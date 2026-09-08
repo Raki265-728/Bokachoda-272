@@ -23,16 +23,19 @@ WIN_STICKER = "CAACAgUAAxkBAAEC4G9pifQIzVJ60qpe_n0aZRqPjOqXfgACXxoAAo_FYFaOLtZ5d
 LOSS_STICKER = "CAACAgUAAxkBAAEC4INpifhHjjiCUzXA_Z87dWdNqXtEkAACNxYAAqXy8Fbys0mlir6tpzoE"
 JACKPOT_STICKER = "CAACAgUAAxkBAAEC4JNpijzPzEMqyQP-MnWjPR9LOSrnggAC-RQAAhjt6VegzLnRRkH9azoE"
 
-API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json"
+# Multiple API URLs
+API_URLS = [
+    "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json",
+    "https://wingo-api.com/WinGo/WinGo_30S/GetHistoryIssuePage.json",
+]
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
     'Content-Type': 'application/json',
-    'Origin': 'https://draw.ar-lottery01.com',
-    'Referer': 'https://draw.ar-lottery01.com/',
-    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
 }
 
 SSL_CONTEXT = ssl.create_default_context()
@@ -56,16 +59,10 @@ number_frequency = Counter()
 accuracy_history = deque(maxlen=30)
 
 BET_PROGRESSION = [10, 35]
-STEP1_BET = 10
-STEP2_BET = 35
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('fixed_bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('FixedBot')
 
@@ -225,41 +222,37 @@ async def send_report():
     
     recent_signals_history = []
 
-# --- Main Function ---
+# --- Main Function with Multiple API Support ---
 async def fetch_data(session):
-    try:
-        async with session.get(
-            API_URL,
-            headers=HEADERS,
-            ssl=SSL_CONTEXT,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as response:
-            logger.info(f"API Status: {response.status}")
-            
-            if response.status == 200:
-                text = await response.text()
-                data = json.loads(text)
+    """Try multiple API URLs"""
+    for url in API_URLS:
+        try:
+            logger.info(f"Trying API: {url}")
+            async with session.get(
+                url,
+                headers=HEADERS,
+                ssl=SSL_CONTEXT,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                logger.info(f"API Status: {response.status} for {url}")
                 
-                if data.get('data') and data['data'].get('list'):
-                    history_list = data['data']['list']
-                    logger.info(f"Got {len(history_list)} records")
-                    return history_list
+                if response.status == 200:
+                    text = await response.text()
+                    data = json.loads(text)
+                    
+                    if data.get('data') and data['data'].get('list'):
+                        history_list = data['data']['list']
+                        logger.info(f"✅ Got {len(history_list)} records from {url}")
+                        return history_list
                 else:
-                    logger.error(f"Invalid data structure: {data}")
-                    return None
-            else:
-                logger.error(f"HTTP {response.status}")
-                return None
-                
-    except aiohttp.ClientError as e:
-        logger.error(f"HTTP error: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unknown error: {e}")
-        return None
+                    logger.warning(f"❌ {url} returned status {response.status}")
+                    
+        except Exception as e:
+            logger.warning(f"❌ {url} failed: {e}")
+            continue
+    
+    logger.error("❌ All APIs failed!")
+    return None
 
 async def process_result(actual_number, period):
     global win_count, loss_count, jackpot_count, total_predictions, loss_streak, session_profit
@@ -324,8 +317,19 @@ async def main_loop():
         if test_data:
             print(f"✅ API working! Got {len(test_data)} records")
         else:
-            print("❌ API not working!")
-            return
+            print("❌ All APIs failed! Retrying in 30 seconds...")
+            await asyncio.sleep(30)
+            # Retry logic
+            retry_count = 0
+            while retry_count < 5 and not test_data:
+                test_data = await fetch_data(session)
+                if not test_data:
+                    retry_count += 1
+                    print(f"Retry {retry_count}/5 failed. Waiting 30s...")
+                    await asyncio.sleep(30)
+            if not test_data:
+                print("❌ API still not working. Exiting...")
+                return
         
         while True:
             try:
@@ -341,26 +345,29 @@ async def main_loop():
                         if last_processed_id:
                             await process_result(current_number, last_processed_id)
                         
-                        history_nums = [int(item['number']) for item in history[:20]]
+                        history_nums = [int(item['number']) for item in history[:20] if item.get('number')]
                         
-                        current_prediction, current_win_rate, current_pattern = predict_trend(history_nums)
-                        current_numbers = generate_numbers(current_prediction, history_nums)
-                        
-                        next_period = str(int(current_id) + 1)
-                        bet = BET_PROGRESSION[min(loss_streak, len(BET_PROGRESSION) - 1)]
-                        
-                        await send_signal(next_period, current_prediction, current_numbers, bet, current_win_rate, current_pattern)
-                        
-                        last_processed_id = current_id
-                        logger.info(f"Signal sent for Period {next_period}")
+                        if history_nums:
+                            current_prediction, current_win_rate, current_pattern = predict_trend(history_nums)
+                            current_numbers = generate_numbers(current_prediction, history_nums)
+                            
+                            next_period = str(int(current_id) + 1)
+                            bet = BET_PROGRESSION[min(loss_streak, len(BET_PROGRESSION) - 1)]
+                            
+                            await send_signal(next_period, current_prediction, current_numbers, bet, current_win_rate, current_pattern)
+                            
+                            last_processed_id = current_id
+                            logger.info(f"Signal sent for Period {next_period}")
+                        else:
+                            logger.error("No valid numbers in history")
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 logger.error(f"Loop error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
 
 if __name__ == "__main__":
     try:
